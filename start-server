@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PORT=""
+PACK_FILE=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_DIR="${SCRIPT_DIR}/runtime"
+PUBLIC_DIR="${RUNTIME_DIR}/public"
+MODS_DIR="${RUNTIME_DIR}/mods"
+SERVER_DATA_DIR="${RUNTIME_DIR}/server-data"
+PID_FILE="${RUNTIME_DIR}/pack-http.pid"
+CONTAINER_NAME="pivo-v-mc-server"
+HTTP_PORT=8080
+SERVER_PROPERTIES="${SERVER_DATA_DIR}/server.properties"
+
+usage() {
+  echo "Usage: ./start-server -p <port> -f <path_to_pack_description>"
+}
+
+while getopts ":p:f:" opt; do
+  case "${opt}" in
+    p) PORT="${OPTARG}" ;;
+    f) PACK_FILE="${OPTARG}" ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "${PORT}" || -z "${PACK_FILE}" ]]; then
+  usage
+  exit 1
+fi
+
+if [[ ! -f "${PACK_FILE}" ]]; then
+  echo "Pack file not found: ${PACK_FILE}"
+  exit 1
+fi
+
+mkdir -p "${PUBLIC_DIR}" "${MODS_DIR}" "${SERVER_DATA_DIR}"
+
+SERVER_PROPERTIES="${SERVER_PROPERTIES}" python3 - <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+path = Path(os.environ["SERVER_PROPERTIES"])
+path.parent.mkdir(parents=True, exist_ok=True)
+lines = []
+if path.exists():
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+def upsert(k: str, v: str) -> None:
+    global lines
+    prefix = f"{k}="
+    for i, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[i] = f"{k}={v}"
+            return
+    lines.append(f"{k}={v}")
+
+upsert("online-mode", "false")
+path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+PY
+
+python3 "${SCRIPT_DIR}/scripts/sync_mods.py" \
+  --pack-file "${PACK_FILE}" \
+  --mods-dir "${MODS_DIR}" \
+  --public-dir "${PUBLIC_DIR}" \
+  --server-host "127.0.0.1" \
+  --server-port "${HTTP_PORT}"
+
+if [[ -f "${PID_FILE}" ]]; then
+  OLD_PID="$(cat "${PID_FILE}")"
+  if kill -0 "${OLD_PID}" 2>/dev/null; then
+    kill "${OLD_PID}" || true
+  fi
+fi
+
+nohup python3 "${SCRIPT_DIR}/scripts/serve_pack.py" \
+  --directory "${PUBLIC_DIR}" \
+  --port "${HTTP_PORT}" \
+  > "${RUNTIME_DIR}/pack-http.log" 2>&1 &
+echo $! > "${PID_FILE}"
+
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+
+LOADER="$(python3 "${SCRIPT_DIR}/scripts/sync_mods.py" --print-loader --pack-file "${PACK_FILE}")"
+LOADER_VERSION="$(python3 "${SCRIPT_DIR}/scripts/sync_mods.py" --print-loader-version --pack-file "${PACK_FILE}")"
+MC_VERSION="$(python3 "${SCRIPT_DIR}/scripts/sync_mods.py" --print-minecraft-version --pack-file "${PACK_FILE}")"
+
+DOCKER_ENV=()
+DOCKER_ENV+=(-e EULA=TRUE)
+DOCKER_ENV+=(-e VERSION="${MC_VERSION}")
+
+case "${LOADER}" in
+  fabric)
+    DOCKER_ENV+=(-e TYPE=FABRIC)
+    ;;
+  neoforge)
+    DOCKER_ENV+=(-e TYPE=NEOFORGE)
+    DOCKER_ENV+=(-e NEOFORGE_VERSION="${LOADER_VERSION}")
+    ;;
+  *)
+    echo "Unsupported loader: ${LOADER}"
+    exit 1
+    ;;
+esac
+
+docker run -d \
+  --name "${CONTAINER_NAME}" \
+  -p "${PORT}:25565" \
+  "${DOCKER_ENV[@]}" \
+  -v "${SERVER_DATA_DIR}:/data" \
+  -v "${MODS_DIR}:/data/mods:ro" \
+  itzg/minecraft-server:latest >/dev/null
+
+echo "Minecraft server started on port ${PORT}"
+echo "Pack distribution API: http://<server-ip>:${HTTP_PORT}/pack.lock.toml"

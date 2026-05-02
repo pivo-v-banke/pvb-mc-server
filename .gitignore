@@ -1,0 +1,8 @@
+# PyCharm / JetBrains
+.idea/
+
+runtime/
+__pycache__/
+*.pyc
+spaces/
+.venv/
