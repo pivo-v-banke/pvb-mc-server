@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import mimetypes
 import posixpath
 import re
 import sys
@@ -207,15 +208,18 @@ class HubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _file(self, path: Path) -> None:
+    def _file(self, path: Path, *, content_type: str | None = None) -> None:
         data = path.read_bytes()
-        content_type = "application/octet-stream"
-        if path.name.endswith(".toml"):
-            content_type = "application/toml; charset=utf-8"
-        if path.name.endswith(".jar"):
-            content_type = "application/java-archive"
+        ct = content_type
+        if ct is None:
+            guessed, _ = mimetypes.guess_type(path.name)
+            ct = guessed or "application/octet-stream"
+            if path.name.endswith(".toml"):
+                ct = "application/toml; charset=utf-8"
+            elif path.name.endswith(".jar"):
+                ct = "application/java-archive"
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", ct)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -325,6 +329,36 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "mod_not_found"})
                 return
             self._file(mod_path)
+            return
+
+        match = re.fullmatch(r"/spaces/([a-zA-Z0-9_.-]+)/desc/(.+)", path)
+        if match:
+            name = match.group(1)
+            rel = unquote(match.group(2))
+            try:
+                space_dir = safe_join(self.spaces_root, name)
+            except ValueError:
+                self._json(400, {"error": "bad_path"})
+                return
+            norm = posixpath.normpath(rel.replace("\\", "/"))
+            if norm.startswith("../") or norm == "..":
+                self._json(400, {"error": "bad_path"})
+                return
+            parts = [p for p in norm.split("/") if p and p != "."]
+            try:
+                target = safe_join(space_dir, *parts)
+            except ValueError:
+                self._json(400, {"error": "bad_path"})
+                return
+            try:
+                target.resolve().relative_to(space_dir.resolve())
+            except ValueError:
+                self._json(400, {"error": "bad_path"})
+                return
+            if not target.is_file():
+                self._json(404, {"error": "file_not_found"})
+                return
+            self._file(target)
             return
 
         self._json(404, {"error": "not_found"})
