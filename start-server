@@ -9,9 +9,9 @@ RUNTIME_DIR="${SCRIPT_DIR}/runtime"
 PUBLIC_DIR="${RUNTIME_DIR}/public"
 MODS_DIR="${RUNTIME_DIR}/mods"
 SERVER_DATA_DIR="${RUNTIME_DIR}/server-data"
-PID_FILE="${RUNTIME_DIR}/pack-http.pid"
 CONTAINER_NAME="pivo-v-mc-server"
-HTTP_PORT=8080
+HUB_HTTP_ORIGIN="${HUB_HTTP_ORIGIN:-http://127.0.0.1:9090}"
+HUB_SPACE_SLUG="${HUB_SPACE_SLUG:-server}"
 SERVER_PROPERTIES="${SERVER_DATA_DIR}/server.properties"
 
 usage() {
@@ -70,21 +70,10 @@ python3 "${SCRIPT_DIR}/scripts/sync_mods.py" \
   --pack-file "${PACK_FILE}" \
   --mods-dir "${MODS_DIR}" \
   --public-dir "${PUBLIC_DIR}" \
-  --server-host "127.0.0.1" \
-  --server-port "${HTTP_PORT}"
-
-if [[ -f "${PID_FILE}" ]]; then
-  OLD_PID="$(cat "${PID_FILE}")"
-  if kill -0 "${OLD_PID}" 2>/dev/null; then
-    kill "${OLD_PID}" || true
-  fi
-fi
-
-nohup python3 "${SCRIPT_DIR}/scripts/serve_pack.py" \
-  --directory "${PUBLIC_DIR}" \
-  --port "${HTTP_PORT}" \
-  > "${RUNTIME_DIR}/pack-http.log" 2>&1 &
-echo $! > "${PID_FILE}"
+  --minecraft-host "127.0.0.1" \
+  --minecraft-port "${PORT}" \
+  --hub-http-origin "${HUB_HTTP_ORIGIN}" \
+  --space-name "${HUB_SPACE_SLUG}"
 
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
@@ -99,6 +88,10 @@ DOCKER_ENV+=(-e VERSION="${MC_VERSION}")
 case "${LOADER}" in
   fabric)
     DOCKER_ENV+=(-e TYPE=FABRIC)
+    ;;
+  forge)
+    DOCKER_ENV+=(-e TYPE=FORGE)
+    DOCKER_ENV+=(-e FORGE_VERSION="${LOADER_VERSION}")
     ;;
   neoforge)
     DOCKER_ENV+=(-e TYPE=NEOFORGE)
@@ -119,4 +112,5 @@ docker run -d \
   itzg/minecraft-server:latest >/dev/null
 
 echo "Minecraft server started on port ${PORT}"
-echo "Pack distribution API: http://<server-ip>:${HTTP_PORT}/pack.lock.toml"
+echo "Lock references hub: ${HUB_HTTP_ORIGIN}/spaces/${HUB_SPACE_SLUG}/pack.lock.toml"
+echo "Serve spaces/ via pivo-cli start-hub (see README)."

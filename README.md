@@ -4,7 +4,7 @@ Server-side orchestrator for a Minecraft modpack with:
 - lock-based mod manifest (`pack.toml`)
 - automatic server mod sync
 - Dockerized Minecraft server startup
-- HTTP distribution endpoint for clients
+- HTTP **hub** (`pivo-cli start-hub`): clients fetch lock + mods at `/spaces/<name>/...`
 
 ## Requirements
 
@@ -23,9 +23,10 @@ Server-side orchestrator for a Minecraft modpack with:
 
 This command:
 - validates and syncs server-side mods to `runtime/mods`
-- prepares a client-visible lock file in `runtime/public/pack.lock.toml`
-- starts static HTTP distribution on `http://<host>:8080`
+- writes `runtime/public/pack.lock.toml` with mod URLs pointing at the **hub** (`HUB_HTTP_ORIGIN`, see script env vars)
 - launches Minecraft server container on the selected game port
+
+There is no separate “pack-only” HTTP listener anymore; distribution goes through the hub reading `spaces/<space>/public/` on disk.
 
 ## Pack Format
 

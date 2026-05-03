@@ -21,10 +21,6 @@ class RepoPaths:
         return self.scripts_dir / "sync_mods.py"
 
     @property
-    def serve_pack_script(self) -> Path:
-        return self.scripts_dir / "serve_pack.py"
-
-    @property
     def template_pack(self) -> Path:
         return self.root / "pack.toml"
 
@@ -64,11 +60,3 @@ class SpacePaths:
     @property
     def backups_dir(self) -> Path:
         return self.root / "backups"
-
-    @property
-    def http_pid(self) -> Path:
-        return self.root / "pack-http.pid"
-
-    @property
-    def http_log(self) -> Path:
-        return self.root / "pack-http.log"

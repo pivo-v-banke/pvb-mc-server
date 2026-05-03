@@ -5,7 +5,7 @@ import logging
 import subprocess
 from pathlib import Path
 
-from pivo import backup, doctor, docker, http_server, mods, pack, spaces, sync
+from pivo import backup, doctor, docker, mods, pack, spaces, sync
 from pivo.conf import SpaceConf
 from pivo.import_pack import import_modrinth_mrpack
 from pivo.logging_utils import setup_logging
@@ -150,11 +150,12 @@ def main(argv: list[str]) -> int:
     conf = SpaceConf.from_file(space.conf)
     LOG.debug("space=%s root=%s", args.space, space.root)
     LOG.info(
-        "Ports: server=%s rcon=%s pack_http=%s (pack_host=%s)",
+        "Ports: minecraft=%s:%s rcon=%s hub_public=http://%s:%s",
+        conf.server_host,
         conf.server_port,
         conf.rcon_port,
-        conf.pack_http_port,
-        conf.pack_host,
+        conf.hub_public_host,
+        conf.hub_public_port,
     )
 
     if args.cmd in {"add-mod", "remove-mod", "list-mods", "start", "reload"}:
@@ -162,7 +163,15 @@ def main(argv: list[str]) -> int:
 
     if args.cmd == "add-mod":
         LOG.info("Adding mod: %s", args.url)
-        entry = mods.build_entry(args.url, side=args.side, mod_id=args.mod_id, filename=args.filename)
+        pinfo = pack.get_pack_info(doc)
+        entry = mods.build_entry(
+            args.url,
+            side=args.side,
+            mod_id=args.mod_id,
+            filename=args.filename,
+            game_version=pinfo.minecraft_version,
+            loader=pinfo.loader,
+        )
         created = mods.add_mod(doc, entry)
         pack.write_pack(space.pack_toml, doc)
         action = "Added" if created else "Updated"
@@ -189,13 +198,11 @@ def main(argv: list[str]) -> int:
         LOG.info("Starting space: %s", args.space)
         sync.apply_jvm_args(space)
         sync.sync_mods(repo, space, conf)
-        http_server.start_http_server(repo, space, port=conf.pack_http_port)
         docker.start(args.space, space, pack.get_pack_info(doc), conf)
         return 0
 
     if args.cmd == "stop":
         LOG.info("Stopping space: %s", args.space)
-        http_server.stop_http_server(space)
         docker.stop(args.space)
         return 0
 
@@ -203,7 +210,9 @@ def main(argv: list[str]) -> int:
         LOG.info("Reloading space: %s", args.space)
         sync.apply_jvm_args(space)
         sync.sync_mods(repo, space, conf)
-        docker.restart(args.space)
+        # restart не подхватывает новые -e из jvm.args; itzg и так перезаписывает
+        # user_jvm_args.txt из INIT_MEMORY/MAX_MEMORY при каждом старте.
+        docker.start(args.space, space, pack.get_pack_info(doc), conf)
         return 0
 
     if args.cmd == "logs":

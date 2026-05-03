@@ -7,9 +7,13 @@ import hashlib
 import shutil
 import tomllib
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 ALLOWED_SIDES = {"client", "server", "both"}
+
+# Modrinth и др. CDN часто отвечают 403 на дефолтный User-Agent Python-urllib.
+_DOWNLOAD_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
 
 def parse_args() -> argparse.Namespace:
@@ -17,8 +21,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pack-file", required=True)
     parser.add_argument("--mods-dir", required=False)
     parser.add_argument("--public-dir", required=False)
-    parser.add_argument("--server-host", required=False, default="127.0.0.1")
-    parser.add_argument("--server-port", required=False, type=int, default=8080)
+    parser.add_argument(
+        "--minecraft-host",
+        default="127.0.0.1",
+        help="Minecraft server host for [distribution] in pack.lock.toml",
+    )
+    parser.add_argument(
+        "--minecraft-port",
+        type=int,
+        default=25565,
+        help="Minecraft server port for [distribution] in pack.lock.toml",
+    )
+    parser.add_argument(
+        "--hub-http-origin",
+        default="http://127.0.0.1:9090",
+        help="Hub base URL (scheme://host:port), used for mod jar URLs in lock",
+    )
+    parser.add_argument(
+        "--space-name",
+        default="",
+        help="Space directory name (hub route /spaces/<name>/mods/...)",
+    )
     parser.add_argument("--print-minecraft-version", action="store_true")
     parser.add_argument("--print-loader", action="store_true")
     parser.add_argument("--print-loader-version", action="store_true")
@@ -38,7 +61,14 @@ def sha256_of(path: Path) -> str:
 
 def download_mod(url: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    with urlopen(url, timeout=120) as response:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": _DOWNLOAD_UA,
+            "Accept": "*/*",
+        },
+    )
+    with urlopen(req, timeout=120) as response:
         target.write_bytes(response.read())
 
 
@@ -57,12 +87,24 @@ def validate_manifest(pack_data: dict) -> None:
             raise ValueError(f"Invalid side `{mod['side']}` for mod `{mod['id']}`")
 
 
+def hub_mod_jar_url(hub_http_origin: str, space_name: str, filename: str) -> str:
+    origin = hub_http_origin.rstrip("/")
+    seg = quote(str(filename), safe="")
+    return f"{origin}/spaces/{space_name}/mods/{seg}"
+
+
 def build_public_lock(
     pack_data: dict,
     mods: list[dict],
-    server_host: str,
-    server_port: int,
+    *,
+    minecraft_host: str,
+    minecraft_port: int,
+    hub_http_origin: str,
+    space_name: str,
 ) -> str:
+    if not space_name.strip():
+        raise ValueError("--space-name is required to build hub-based pack.lock.toml")
+
     lines: list[str] = []
     pack = pack_data["pack"]
     lines.append("[pack]")
@@ -72,8 +114,8 @@ def build_public_lock(
     lines.append(f'loader_version = "{pack["loader_version"]}"')
     lines.append("")
     lines.append("[distribution]")
-    lines.append(f'server_host = "{server_host}"')
-    lines.append(f"server_port = {server_port}")
+    lines.append(f'server_host = "{minecraft_host}"')
+    lines.append(f"server_port = {minecraft_port}")
     lines.append("")
 
     for mod in mods:
@@ -82,7 +124,8 @@ def build_public_lock(
         lines.append(f'filename = "{mod["filename"]}"')
         lines.append(f'sha256 = "{mod["sha256"]}"')
         lines.append(f'side = "{mod["side"]}"')
-        lines.append(f'url = "http://{server_host}:{server_port}/mods/{mod["filename"]}"')
+        jar_url = hub_mod_jar_url(hub_http_origin, space_name.strip(), mod["filename"])
+        lines.append(f'url = "{jar_url}"')
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"
@@ -160,7 +203,14 @@ def run() -> int:
         if rel not in server_mods and file.name not in server_mods:
             file.unlink(missing_ok=True)
 
-    lock_text = build_public_lock(pack_data, public_mods, args.server_host, args.server_port)
+    lock_text = build_public_lock(
+        pack_data,
+        public_mods,
+        minecraft_host=args.minecraft_host,
+        minecraft_port=args.minecraft_port,
+        hub_http_origin=args.hub_http_origin,
+        space_name=args.space_name,
+    )
     (public_dir / "pack.lock.toml").write_text(lock_text, encoding="utf-8")
     return 0
 

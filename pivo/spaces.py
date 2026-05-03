@@ -56,11 +56,11 @@ def create_space(repo: RepoPaths, name: str, *, template_pack: Path | None) -> S
         space.jvm_args.write_text(
             "\n".join(
                 [
-                    "# JVM args for the Minecraft server process",
-                    "# This will be copied to /data/user_jvm_args.txt before start/reload.",
-                    "# Example:",
-                    "# -Xms2G",
-                    "# -Xmx4G",
+                    "# Куча: pivo-cli передаёт -Xms/-Xmx в контейнер как INIT_MEMORY / MAX_MEMORY",
+                    "# (образ itzg перезаписывает data/user_jvm_args.txt при старте — см. jvm_itzg).",
+                    "# Прочие флаги Java — в тех же строках; уйдут в JVM_OPTS.",
+                    "-Xms2G",
+                    "-Xmx4G",
                     "",
                 ]
             ),

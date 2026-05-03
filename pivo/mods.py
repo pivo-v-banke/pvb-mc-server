@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from tomlkit.items import Table
@@ -14,6 +15,9 @@ from pivo.pack import ensure_mods_array
 
 
 ALLOWED_SIDES = {"client", "server", "both"}
+
+# Modrinth CDN и API отклоняют типичный Python-urllib без нормального User-Agent.
+_REQUEST_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
 
 @dataclass(frozen=True)
@@ -26,13 +30,13 @@ class ModEntry:
 
 
 def http_get(url: str) -> bytes:
-    req = Request(url, headers={"User-Agent": "pivo-cli/0.3"})
+    req = Request(url, headers={"User-Agent": _REQUEST_UA, "Accept": "*/*"})
     with urlopen(req, timeout=180) as response:
         return response.read()
 
 
 def sha256_stream(url: str) -> str:
-    req = Request(url, headers={"User-Agent": "pivo-cli/0.3"})
+    req = Request(url, headers={"User-Agent": _REQUEST_UA, "Accept": "*/*"})
     digest = hashlib.sha256()
     with urlopen(req, timeout=180) as response:
         while True:
@@ -51,19 +55,107 @@ def filename_from_url(url: str) -> str:
     return name
 
 
-def normalize_modrinth_download(url: str) -> str:
-    if url.startswith("https://cdn.modrinth.com/"):
-        return url
-    if "modrinth.com/mod/" not in url or "/version/" not in url:
-        return url
-    html = http_get(url).decode("utf-8", errors="replace")
-    match = re.search(r"https://cdn\\.modrinth\\.com/data/[^\\s\"']+\\.jar", html)
-    if match:
-        return match.group(0)
-    raise ValueError(
-        "Could not resolve Modrinth download URL from version page. "
-        "Pass direct cdn.modrinth.com .jar URL instead."
+_MODRINTH_MOD_RE = re.compile(
+    r"^https?://(?:www\.)?modrinth\.com/(?:app/)?mod/([^/]+)(?:/version/([^/?#]+))?/?(?:\?.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _modrinth_get_json(api_path: str) -> Any:
+    u = f"https://api.modrinth.com/v2{api_path}"
+    req = Request(u, headers={"User-Agent": _REQUEST_UA, "Accept": "application/json"})
+    with urlopen(req, timeout=180) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _jar_from_modrinth_version(ver: dict) -> tuple[str, str | None, str | None]:
+    """Возвращает (cdn_url, filename, sha256 или None)."""
+    files = ver.get("files") or []
+    candidates = list(files)
+    primary = next((f for f in candidates if f.get("primary")), None)
+    jar = primary or next((f for f in candidates if str(f.get("filename", "")).endswith(".jar")), None)
+    if not jar:
+        raise ValueError("Modrinth version has no .jar file in API response")
+    u = str(jar.get("url") or "")
+    if not u.startswith("https://cdn.modrinth.com/"):
+        raise ValueError(f"Unexpected Modrinth file URL: {u!r}")
+    fn = str(jar.get("filename") or "") or None
+    hashes = jar.get("hashes") if isinstance(jar.get("hashes"), dict) else {}
+    sha = hashes.get("sha256") if isinstance(hashes, dict) else None
+    sha = str(sha) if sha else None
+    return u, fn, sha
+
+
+def resolve_modrinth_url(
+    url: str,
+    *,
+    game_version: str | None = None,
+    loader: str | None = None,
+    loose: bool = False,
+) -> tuple[str, str | None]:
+    """
+    Ссылки modrinth.com → (cdn .jar URL, sha256 из API или None).
+    loose=True: страница /mod/<slug> без версии и без game/loader — вернуть URL как есть (для remove-mod).
+    """
+    u = (url or "").strip()
+    if u.startswith("https://cdn.modrinth.com/"):
+        return u, None
+
+    m = _MODRINTH_MOD_RE.match(u)
+    if not m:
+        cdn_guess = _modrinth_cdn_from_version_html_page(u)
+        return (cdn_guess if cdn_guess else u), None
+
+    slug, version_id = m.group(1), m.group(2)
+
+    if version_id:
+        ver = _modrinth_get_json(f"/version/{quote(version_id, safe='')}")
+        jar_url, _fn, sha = _jar_from_modrinth_version(ver)
+        return jar_url, sha
+
+    if not game_version or not loader:
+        if loose:
+            return u, None
+        raise ValueError(
+            "Ссылка вида https://modrinth.com/mod/<slug> без /version/…: "
+            "нужны minecraft_version и loader из [pack] (добавляйте через `pivo-cli -s <space> add-mod …`) "
+            "или укажите прямую ссылку на .jar с cdn.modrinth.com."
+        )
+
+    q = (
+        f"?game_versions={quote(json.dumps([game_version]))}"
+        f"&loaders={quote(json.dumps([loader]))}"
     )
+    versions = _modrinth_get_json(f"/project/{quote(slug, safe='')}/version{q}")
+    if not isinstance(versions, list) or not versions:
+        raise ValueError(
+            f"Modrinth: нет версии для «{slug}» с game_versions={game_version!r} и loaders={loader!r}. "
+            "Проверьте slug, версию Minecraft и лоадер в pack.toml."
+        )
+    jar_url, _fn, sha = _jar_from_modrinth_version(versions[0])
+    return jar_url, sha
+
+
+def normalize_modrinth_download(
+    url: str,
+    *,
+    game_version: str | None = None,
+    loader: str | None = None,
+    loose: bool = False,
+) -> str:
+    """Только URL (совместимость с remove-mod и старым кодом)."""
+    resolved, _ = resolve_modrinth_url(
+        url, game_version=game_version, loader=loader, loose=loose
+    )
+    return resolved
+
+
+def _modrinth_cdn_from_version_html_page(url: str) -> str | None:
+    if "modrinth.com/mod/" not in url or "/version/" not in url:
+        return None
+    html = http_get(url).decode("utf-8", errors="replace")
+    match = re.search(r"https://cdn\.modrinth\.com/data/[^\s\"']+\.jar", html)
+    return match.group(0) if match else None
 
 
 def guess_id(filename: str) -> str:
@@ -72,12 +164,25 @@ def guess_id(filename: str) -> str:
     return base[:64] if base else "mod"
 
 
-def build_entry(url: str, *, side: str, mod_id: str | None, filename: str | None) -> ModEntry:
+def build_entry(
+    url: str,
+    *,
+    side: str,
+    mod_id: str | None,
+    filename: str | None,
+    game_version: str | None = None,
+    loader: str | None = None,
+) -> ModEntry:
     if side not in ALLOWED_SIDES:
         raise ValueError(f"Invalid side: {side}")
-    resolved_url = normalize_modrinth_download(url) if url.startswith("http") else url
+    if url.startswith("http"):
+        resolved_url, api_sha = resolve_modrinth_url(
+            url, game_version=game_version, loader=loader, loose=False
+        )
+    else:
+        resolved_url, api_sha = url, None
     jar_filename = filename or filename_from_url(resolved_url)
-    sha = sha256_stream(resolved_url)
+    sha = api_sha if api_sha else sha256_stream(resolved_url)
     entry_id = mod_id or guess_id(jar_filename)
     return ModEntry(
         mod_id=entry_id,
@@ -116,7 +221,7 @@ def remove_mod(doc: Table, url_or_key: str) -> int:
     normalized = url_or_key
     if url_or_key.startswith("http"):
         try:
-            normalized = normalize_modrinth_download(url_or_key)
+            normalized = normalize_modrinth_download(url_or_key, loose=True)
         except Exception:  # noqa: BLE001
             normalized = url_or_key
 

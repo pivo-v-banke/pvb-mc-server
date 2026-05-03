@@ -5,6 +5,7 @@ import re
 import subprocess
 
 from pivo.conf import SpaceConf
+from pivo.jvm_itzg import jvm_args_to_itzg_env
 from pivo.pack import PackInfo
 from pivo.paths import SpacePaths
 
@@ -50,12 +51,19 @@ def start(space_name: str, space: SpacePaths, pack: PackInfo, conf: SpaceConf) -
     ]
     if pack.loader == "fabric":
         env += ["-e", "TYPE=FABRIC"]
+    elif pack.loader == "forge":
+        env += ["-e", "TYPE=FORGE"]
+        if pack.loader_version and pack.loader_version not in {"latest"}:
+            env += ["-e", f"FORGE_VERSION={pack.loader_version}"]
     elif pack.loader == "neoforge":
         env += ["-e", "TYPE=NEOFORGE"]
         if pack.loader_version and pack.loader_version not in {"latest"}:
             env += ["-e", f"NEOFORGE_VERSION={pack.loader_version}"]
     else:
         raise ValueError(f"Unsupported loader: {pack.loader}")
+
+    for key, val in jvm_args_to_itzg_env(space.jvm_args).items():
+        env += ["-e", f"{key}={val}"]
 
     cmd = [
         "docker",
