@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+from pathlib import Path
 
 from pivo.conf import SpaceConf
 from pivo.jvm_itzg import jvm_args_to_itzg_env
@@ -62,6 +63,24 @@ def start(space_name: str, space: SpacePaths, pack: PackInfo, conf: SpaceConf) -
     else:
         raise ValueError(f"Unsupported loader: {pack.loader}")
 
+    vol = ["-v", str(space.data_dir.resolve()) + ":/data"]
+    inner_installer = "/installer/neoforge-installer.jar"
+    if (
+        pack.loader == "neoforge"
+        and conf.neoforge_installer.strip()
+    ):
+        host_installer = Path(conf.neoforge_installer.strip())
+        if not host_installer.is_absolute():
+            host_installer = space.root / host_installer
+        host_installer = host_installer.resolve()
+        if not host_installer.is_file():
+            raise FileNotFoundError(
+                "NEOFORGE_INSTALLER in pivo.conf must point to an existing installer JAR: "
+                f"{host_installer}"
+            )
+        env += ["-e", f"NEOFORGE_INSTALLER={inner_installer}"]
+        vol += ["-v", f"{host_installer}:{inner_installer}:ro"]
+
     for key, val in jvm_args_to_itzg_env(space.jvm_args).items():
         env += ["-e", f"{key}={val}"]
 
@@ -76,8 +95,7 @@ def start(space_name: str, space: SpacePaths, pack: PackInfo, conf: SpaceConf) -
         "-p",
         f"{conf.rcon_port}:25575",
         *env,
-        "-v",
-        f"{space.data_dir}:/data",
+        *vol,
         conf.image,
     ]
     run_checked([str(x) for x in cmd])

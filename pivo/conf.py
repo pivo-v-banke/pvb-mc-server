@@ -16,6 +16,8 @@ class SpaceConf:
     image: str = "itzg/minecraft-server:latest"
     # Human-readable label for hub / launcher (optional; defaults to space folder name in UI)
     space_display_name: str = ""
+    # Путь к neoforge-*-installer.jar на хосте (обход 404 maven-metadata у NeoForge). Пусто = авто по Maven.
+    neoforge_installer: str = ""
 
     @staticmethod
     def from_file(path: Path) -> SpaceConf:
@@ -47,6 +49,7 @@ class SpaceConf:
             rcon_password=raw.get("RCON_PASSWORD", "changeme"),
             image=raw.get("IMAGE", "itzg/minecraft-server:latest"),
             space_display_name=raw.get("SPACE_DISPLAY_NAME", "").strip(),
+            neoforge_installer=(raw.get("NEOFORGE_INSTALLER") or "").strip(),
         )
 
     def to_template_text(self) -> str:
@@ -62,6 +65,8 @@ class SpaceConf:
                 f"RCON_PASSWORD={self.rcon_password}",
                 f"IMAGE={self.image}",
                 f"SPACE_DISPLAY_NAME={self.space_display_name}",
+                "# Опционально: путь к neoforge-*-installer.jar (если NeoForge Maven metadata недоступен)",
+                "# NEOFORGE_INSTALLER=neoforge-21.1.227-installer.jar",
                 "",
             ]
         )
